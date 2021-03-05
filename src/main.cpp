@@ -1,25 +1,33 @@
 #include <Arduino.h>
 #include <EEPROM.h>
 #include <WiFi.h>
+#include <HTTPClient.h>
+#include <WiFiClientSecure.h>
 #include <esp_https_ota.h>
 #include <esp_task_wdt.h>
 
 const size_t strLen = 32;
 const int SSIDPos = 0;
 const int passwordPos = 32;
+const int nodePos = 64;
 char SSID[strLen];
 char password[strLen];
+char node[strLen]; // e.g. vega-n2k-node1
+char version[16]; // semver
+
+const char *imageUrlFormat = "https://vega-ota.s3.eu-north-1.amazonaws.com/%s/%s";
+char imageUrl[128];
 
 void interactiveConfig();
-void ask(char *bytes, const char *msg, const char *currentValue);
+void connectWiFi();
+void getLatestVersion();
+void ask(char *bytes, size_t len, const char *msg, const char *currentValue);
 void writeStr(char *data, int offset);
 void readStr(int pos, char *data, size_t len);
 esp_err_t doUpdate();
 
 extern const uint8_t s3CA_start[] asm("_binary_src_s3_ca_pem_start");
 extern const uint8_t s3CA_end[] asm("_binary_src_s3_ca_pem_end");
-
-const char *IMAGE_URL = "https://vega-ota.s3.eu-north-1.amazonaws.com/vega-n2k-node1/firmware-latest.bin";
 
 
 void setup() {
@@ -30,6 +38,19 @@ void setup() {
 
   interactiveConfig();
 
+  connectWiFi();
+
+  getLatestVersion();
+  char imageName[32];
+  sprintf(imageName, "firmware-%s.bin", version);
+  sprintf(imageUrl, imageUrlFormat, node, imageName);
+
+  if (doUpdate() != ESP_OK) {
+    Serial.println("Update failed, please reboot and try again.");
+  }
+}
+
+void connectWiFi() {
   Serial.print("Connecting WiFi");
 
   WiFi.begin(SSID, password);
@@ -37,17 +58,37 @@ void setup() {
     delay(1000);
     Serial.print('.');
   }
-  Serial.print("\nConnected, IP address: "); Serial.println(WiFi.localIP());
 
-  Serial.println("Starting OTA upgrade");
-  if (doUpdate() != ESP_OK) {
-    Serial.println("Update failed, please reboot and try again.");
+  Serial.print("\nConnected, IP address: "); Serial.println(WiFi.localIP());
+}
+
+void getLatestVersion() {
+  char versionUrl[128];
+  sprintf(versionUrl, imageUrlFormat, node, "latest.txt");
+
+  Serial.printf("Fetching latest version number from %s\n", versionUrl);
+
+  HTTPClient https;
+
+  if (https.begin(versionUrl, (char *)s3CA_start)) {
+    int httpCode = https.GET();
+
+    if (httpCode == HTTP_CODE_OK) {
+      String ver = https.getString();
+      ver.trim();
+      ver.toCharArray(version, 16);
+      Serial.printf("Got version %s\n", version);
+    } else {
+      Serial.printf("Version fetch failed, HTTP code %i\n", httpCode);
+    }
   }
 }
 
 esp_err_t doUpdate() {
+  Serial.println("Starting OTA upgrade");
+
   esp_http_client_config_t http_conf = {
-    .url = "https://vega-ota.s3.eu-north-1.amazonaws.com/vega-n2k-node1/firmware-latest.bin",
+    .url = imageUrl,
     .host = NULL,
     .port = 443,
     .username = NULL,
@@ -97,17 +138,22 @@ esp_err_t doUpdate() {
 void interactiveConfig() {
   char SSID_C[strLen];
   readStr(SSIDPos, SSID_C, strLen);
-  ask(SSID, "WiFi SSID", SSID_C);
+  ask(SSID, strLen, "WiFi SSID", SSID_C);
 
   char PWD_C[strLen];
   readStr(passwordPos, PWD_C, strLen);
-  ask(password, "WiFi password", PWD_C);
+  ask(password, strLen, "WiFi password", PWD_C);
+
+  char NODE_C[strLen];
+  readStr(nodePos, NODE_C, strLen);
+  ask(node, strLen, "Node project name", NODE_C);
 
   writeStr(SSID, SSIDPos);
   writeStr(password, passwordPos);
+  writeStr(node, nodePos);
 }
 
-void ask(char *bytes, const char *msg, const char *currentValue) {
+void ask(char *bytes, size_t len, const char *msg, const char *currentValue) {
   boolean waitingForInput = true;
   byte ndx = 0;
   char rc;
@@ -119,10 +165,10 @@ void ask(char *bytes, const char *msg, const char *currentValue) {
       rc = Serial.read();
       if (rc != '\n') {
         bytes[ndx++] = rc;
-        if (ndx >= strLen) ndx = strLen - 1;
+        if (ndx >= len) ndx = len - 1;
       } else {
         if (ndx == 0) {
-          strncpy(bytes, currentValue, strLen);
+          strncpy(bytes, currentValue, len);
         } else {
           bytes[ndx] = '\0';
         }
