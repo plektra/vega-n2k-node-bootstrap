@@ -2,7 +2,6 @@
 #include <EEPROM.h>
 #include <WiFi.h>
 #include <HTTPClient.h>
-#include <WiFiClientSecure.h>
 #include <esp_https_ota.h>
 #include <esp_task_wdt.h>
 
@@ -10,6 +9,7 @@ const size_t strLen = 32;
 const int SSIDPos = 0;
 const int passwordPos = 32;
 const int nodePos = 64;
+const int versionPos = 96;
 char SSID[strLen];
 char password[strLen];
 char node[strLen]; // e.g. vega-n2k-node1
@@ -41,6 +41,8 @@ void setup() {
   connectWiFi();
 
   getLatestVersion();
+  writeStr(version, versionPos);
+
   char imageName[32];
   sprintf(imageName, "firmware-%s.bin", version);
   sprintf(imageUrl, imageUrlFormat, node, imageName);
@@ -181,10 +183,10 @@ void ask(char *bytes, size_t len, const char *msg, const char *currentValue) {
 
 void writeStr(char *data, int offset) {
   int i=0;
-  for (; i<strLen; i++) {
+  for (; i<strlen(data); i++) {
     EEPROM.write(offset+i, data[i]);
   }
-  //EEPROM.write(offset+i, '\0');
+  EEPROM.write(offset+i, '\0');
   EEPROM.commit();
 }
 
