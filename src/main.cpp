@@ -5,6 +5,8 @@
 #include <esp_https_ota.h>
 #include <esp_task_wdt.h>
 
+#define LED_PIN 2
+
 const size_t strLen = 32;
 const int SSIDPos = 0;
 const int passwordPos = 32;
@@ -20,17 +22,17 @@ char imageUrl[128];
 
 void interactiveConfig();
 void connectWiFi();
-void getLatestVersion();
+boolean getLatestVersion(const char *imageUrlFormat, char *node, char *latestVersion);
 void ask(char *bytes, size_t len, const char *msg, const char *currentValue);
 void writeStr(char *data, int offset);
 void readStr(int pos, char *data, size_t len);
 esp_err_t doUpdate();
 
-extern const uint8_t s3CA_start[] asm("_binary_src_s3_ca_pem_start");
-extern const uint8_t s3CA_end[] asm("_binary_src_s3_ca_pem_end");
-
+extern const uint8_t S3CA[] asm("_binary_src_s3_ca_pem_start");
 
 void setup() {
+  pinMode(LED_PIN, OUTPUT);
+
   Serial.begin(115200);
   Serial.println("Configuring Wifi credentials & OTA in EEPROM.");
 
@@ -40,7 +42,11 @@ void setup() {
 
   connectWiFi();
 
-  getLatestVersion();
+  if (!getLatestVersion(imageUrlFormat, node, version)) {
+    Serial.println("Update failed, please reboot and try again.");
+    return;
+  }
+
   writeStr(version, versionPos);
 
   char imageName[32];
@@ -49,6 +55,7 @@ void setup() {
 
   if (doUpdate() != ESP_OK) {
     Serial.println("Update failed, please reboot and try again.");
+    return;
   }
 }
 
@@ -56,15 +63,31 @@ void connectWiFi() {
   Serial.print("Connecting WiFi");
 
   WiFi.begin(SSID, password);
+  int retries = 0;
+  boolean timeout = false;
   while (WiFi.status() != WL_CONNECTED) {
     delay(1000);
     Serial.print('.');
+    if (retries++ >= 5) {
+      timeout = true;
+      break;
+    }
+  }
+
+  if (timeout) {
+    Serial.printf("\nUnable to connect WiFi");
+    while (true) {
+      digitalWrite(LED_PIN, HIGH);
+      delay(500);
+      digitalWrite(LED_PIN, LOW);
+      delay(500);
+    }
   }
 
   Serial.print("\nConnected, IP address: "); Serial.println(WiFi.localIP());
 }
 
-void getLatestVersion() {
+boolean getLatestVersion(const char *imageUrlFormat, char *node, char *latestVersion) {
   char versionUrl[128];
   sprintf(versionUrl, imageUrlFormat, node, "latest.txt");
 
@@ -72,18 +95,24 @@ void getLatestVersion() {
 
   HTTPClient https;
 
-  if (https.begin(versionUrl, (char *)s3CA_start)) {
+  if (https.begin(versionUrl, (char *)S3CA)) {
     int httpCode = https.GET();
 
     if (httpCode == HTTP_CODE_OK) {
       String ver = https.getString();
       ver.trim();
-      ver.toCharArray(version, 16);
-      Serial.printf("Got version %s\n", version);
-    } else {
-      Serial.printf("Version fetch failed, HTTP code %i\n", httpCode);
+      ver.toCharArray(latestVersion, 16);
+      Serial.printf("Got version %s\n", latestVersion);
+      return true;
     }
+
+    Serial.printf("Version fetch failed, HTTP code %i\n", httpCode);
+    Serial.println(https.getString());
+    return false;
   }
+
+  Serial.printf("Version fetch failed");
+  return false;
 }
 
 esp_err_t doUpdate() {
@@ -98,7 +127,7 @@ esp_err_t doUpdate() {
     .auth_type = HTTP_AUTH_TYPE_NONE,
     .path = NULL,
     .query = NULL,
-    .cert_pem = (char *)s3CA_start,
+    .cert_pem = (char *)S3CA,
   };
   esp_https_ota_config_t config = { .http_config = &http_conf };
 
